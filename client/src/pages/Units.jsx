@@ -8,6 +8,7 @@ import {
 
 const BHK_TYPES = ['2BHK', '3BHK'];
 const BLOCKS = ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I'];
+const FLOOR_LABELS = { 0: 'Ground', 1: '1st', 2: '2nd', 3: '3rd' };
 
 export default function Units() {
   const { isAdmin } = useAuth();
@@ -32,7 +33,6 @@ export default function Units() {
 
   useEffect(() => { loadFlats(); }, []);
 
-  // Derive stats from response - API returns {total, byBHK:[], byBlock:[], totalArea:{carpet,super,uds}}
   const derivedStats = useMemo(() => {
     if (!stats) return null;
     const bhk2 = stats.byBHK?.find(b => b.bhk_type === '2BHK');
@@ -63,65 +63,118 @@ export default function Units() {
     loadFlats();
   };
 
+  // --- CSV Template Download ---
   const downloadTemplate = () => {
-    const headers = 'flat_number,block,floor,bhk_type,carpet_area_sqft,super_buildup_sqft,uds_area_sqft,owner_name,owner_email,owner_phone';
-    const example1 = 'A-101,A,1,2BHK,743,1100,491,Rajesh Kumar,rajesh@email.com,9876543210';
-    const example2 = 'B-201,B,2,3BHK,1016,1520,678,Priya Sharma,priya@email.com,9876543211';
-    const csv = [headers, '# Example rows below (delete these before uploading):', example1, example2].join('\n');
-    const blob = new Blob([csv], { type: 'text/csv' });
+    const headers = 'flat_number,block,floor,bhk_type,super_buildup_sqft,carpet_area_sqft,uds_area_sqft';
+    const lines = [
+      headers,
+      '# Delete these example rows before importing your data:',
+      'A-001,A,0,2BHK,1100,743,491',
+      'A-003,A,0,3BHK,1520,1016,678',
+      'B-110,B,1,2BHK,1175,771,524',
+    ];
+    const blob = new Blob([lines.join('\n')], { type: 'text/csv' });
     const url = URL.createObjectURL(blob);
-    const a = document.createElement('a'); a.href = url; a.download = 'pwps_flat_template.csv'; a.click();
+    const a = document.createElement('a');
+    a.href = url; a.download = 'pwps_flat_import_template.csv'; a.click();
     URL.revokeObjectURL(url);
   };
 
+  // --- Export current flats as CSV (matches what's shown in the table) ---
   const exportFlats = () => {
-    const headers = 'flat_number,block,floor,bhk_type,carpet_area_sqft,super_buildup_sqft,uds_area_sqft';
-    const rows = flats.map(f =>
-      `${f.flat_number},${f.block || ''},${f.floor ?? ''},${f.bhk_type},${f.carpet_area_sqft},${f.super_buildup_sqft || ''},${f.uds_area_sqft}`
-    );
+    const headers = 'flat_number,block,floor,bhk_type,super_buildup_sqft,carpet_area_sqft,uds_area_sqft';
+    const rows = filtered.map(f => {
+      const floorLabel = FLOOR_LABELS[f.floor] ?? f.floor ?? '';
+      return `${f.flat_number},${f.block || ''},${floorLabel},${f.bhk_type},${f.super_buildup_sqft || ''},${f.carpet_area_sqft},${f.uds_area_sqft}`;
+    });
     const csv = [headers, ...rows].join('\n');
     const blob = new Blob([csv], { type: 'text/csv' });
     const url = URL.createObjectURL(blob);
-    const a = document.createElement('a'); a.href = url; a.download = 'pwps_flats_export.csv'; a.click();
+    const a = document.createElement('a');
+    a.href = url; a.download = `pwps_flats_export_${filtered.length}units.csv`; a.click();
     URL.revokeObjectURL(url);
   };
 
+  // --- CSV Upload & Parse ---
   const handleFileUpload = async (e) => {
     const file = e.target.files?.[0];
     if (!file) return;
     setUploadResult(null);
+
     const text = await file.text();
     const lines = text.split('\n').map(l => l.trim()).filter(l => l && !l.startsWith('#'));
-    if (lines.length < 2) { setUploadResult({ error: 'CSV must have a header row and at least one data row.' }); return; }
+    if (lines.length < 2) {
+      setUploadResult({ error: 'CSV must have a header row and at least one data row.' });
+      return;
+    }
+
     const header = lines[0].split(',').map(h => h.trim().toLowerCase());
-    const required = ['flat_number', 'bhk_type', 'carpet_area_sqft', 'uds_area_sqft', 'owner_name'];
+    const required = ['flat_number', 'bhk_type', 'carpet_area_sqft', 'uds_area_sqft'];
     const missing = required.filter(r => !header.includes(r));
-    if (missing.length > 0) { setUploadResult({ error: `Missing required columns: ${missing.join(', ')}` }); return; }
-    const flatsToImport = [], errors = [];
+    if (missing.length > 0) {
+      setUploadResult({ error: `Missing required columns: ${missing.join(', ')}` });
+      return;
+    }
+
+    const FLOOR_REVERSE = { 'ground': 0, '1st': 1, '2nd': 2, '3rd': 3 };
+    const flatsToImport = [];
+    const errors = [];
+
     for (let i = 1; i < lines.length; i++) {
       const vals = lines[i].split(',').map(v => v.trim());
       if (vals.length < header.length) { errors.push(`Row ${i + 1}: not enough columns`); continue; }
-      const row = {}; header.forEach((h, idx) => { row[h] = vals[idx]; });
-      if (!row.flat_number || !row.bhk_type || !row.carpet_area_sqft || !row.uds_area_sqft || !row.owner_name) { errors.push(`Row ${i + 1}: missing required fields`); continue; }
-      if (!BHK_TYPES.includes(row.bhk_type)) { errors.push(`Row ${i + 1}: invalid bhk_type "${row.bhk_type}" (use 2BHK/3BHK)`); continue; }
+      const row = {};
+      header.forEach((h, idx) => { row[h] = vals[idx]; });
+
+      if (!row.flat_number || !row.bhk_type || !row.carpet_area_sqft || !row.uds_area_sqft) {
+        errors.push(`Row ${i + 1}: missing required fields (flat_number, bhk_type, carpet_area_sqft, uds_area_sqft)`);
+        continue;
+      }
+      if (!BHK_TYPES.includes(row.bhk_type)) {
+        errors.push(`Row ${i + 1}: invalid bhk_type "${row.bhk_type}" (use 2BHK or 3BHK)`);
+        continue;
+      }
+
+      // Parse floor: accept number or label
+      let floorVal = null;
+      if (row.floor != null && row.floor !== '') {
+        const fl = row.floor.toLowerCase();
+        floorVal = FLOOR_REVERSE[fl] ?? (isNaN(Number(fl)) ? null : Number(fl));
+      }
+
       flatsToImport.push({
-        flat_number: row.flat_number, block: row.block || null, floor: row.floor ? Number(row.floor) : null,
-        bhk_type: row.bhk_type, carpet_area_sqft: Number(row.carpet_area_sqft),
+        flat_number: row.flat_number,
+        block: row.block || null,
+        floor: floorVal,
+        bhk_type: row.bhk_type,
+        carpet_area_sqft: Number(row.carpet_area_sqft),
         super_buildup_sqft: row.super_buildup_sqft ? Number(row.super_buildup_sqft) : null,
-        uds_area_sqft: Number(row.uds_area_sqft), owner_name: row.owner_name,
-        owner_email: row.owner_email || null, owner_phone: row.owner_phone || null,
+        uds_area_sqft: Number(row.uds_area_sqft),
+        owner_name: row.owner_name || 'Resident',
+        owner_email: row.owner_email || null,
+        owner_phone: row.owner_phone || null,
       });
     }
-    if (flatsToImport.length === 0) { setUploadResult({ error: 'No valid rows. Errors: ' + errors.join('; ') }); return; }
+
+    if (flatsToImport.length === 0) {
+      setUploadResult({ error: 'No valid rows found. ' + (errors.length ? 'Errors: ' + errors.join('; ') : '') });
+      return;
+    }
+
     try {
       const { data } = await api.post('/flats/bulk', { flats: flatsToImport });
-      setUploadResult({ success: true, message: `${data.inserted} of ${data.total} flats imported.`, errors: errors.length > 0 ? errors : null });
+      setUploadResult({
+        success: true,
+        message: `${data.inserted} of ${data.total} flats imported successfully.`,
+        errors: errors.length > 0 ? errors : null,
+      });
       loadFlats();
-    } catch (err) { setUploadResult({ error: err.response?.data?.error || 'Upload failed' }); }
+    } catch (err) {
+      setUploadResult({ error: err.response?.data?.error || 'Upload failed' });
+    }
+
     if (fileRef.current) fileRef.current.value = '';
   };
-
-  const FLOOR_LABELS = { 0: 'Ground', 1: '1st', 2: '2nd', 3: '3rd' };
 
   return (
     <div className="space-y-5 animate-fade-in">
@@ -162,29 +215,15 @@ export default function Units() {
         </div>
       )}
 
-      {/* Stats cards - using derivedStats with correct field mapping */}
       {derivedStats && (
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-          <div className="stat-card">
-            <p className="text-xs text-gray-500">Total Units</p>
-            <p className="text-xl font-display font-bold text-gray-900">{derivedStats.totalFlats}</p>
-          </div>
-          <div className="stat-card">
-            <p className="text-xs text-gray-500">Total SBA</p>
-            <p className="text-xl font-display font-bold text-gray-900">{derivedStats.totalSBA.toLocaleString('en-IN')} Sft</p>
-          </div>
-          <div className="stat-card">
-            <p className="text-xs text-gray-500">2 BHK</p>
-            <p className="text-xl font-display font-bold text-gray-900">{derivedStats.bhk2Count}</p>
-          </div>
-          <div className="stat-card">
-            <p className="text-xs text-gray-500">3 BHK</p>
-            <p className="text-xl font-display font-bold text-gray-900">{derivedStats.bhk3Count}</p>
-          </div>
+          <div className="stat-card"><p className="text-xs text-gray-500">Total Units</p><p className="text-xl font-display font-bold text-gray-900">{derivedStats.totalFlats}</p></div>
+          <div className="stat-card"><p className="text-xs text-gray-500">Total SBA</p><p className="text-xl font-display font-bold text-gray-900">{derivedStats.totalSBA.toLocaleString('en-IN')} Sft</p></div>
+          <div className="stat-card"><p className="text-xs text-gray-500">2 BHK</p><p className="text-xl font-display font-bold text-gray-900">{derivedStats.bhk2Count}</p></div>
+          <div className="stat-card"><p className="text-xs text-gray-500">3 BHK</p><p className="text-xl font-display font-bold text-gray-900">{derivedStats.bhk3Count}</p></div>
         </div>
       )}
 
-      {/* Filters */}
       <div className="flex flex-wrap items-center gap-3">
         <div className="relative flex-1 max-w-xs">
           <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
@@ -201,7 +240,6 @@ export default function Units() {
         <span className="text-xs text-gray-400">{filtered.length} results</span>
       </div>
 
-      {/* Table */}
       <div className="table-container">
         <table>
           <thead>
@@ -229,12 +267,8 @@ export default function Units() {
                 {isAdmin && (
                   <td>
                     <div className="flex gap-1">
-                      <button onClick={() => { setEditFlat(f); setShowForm(true); }} className="btn-ghost p-1.5" title="Edit">
-                        <Edit2 className="w-3.5 h-3.5" />
-                      </button>
-                      <button onClick={() => handleDelete(f.id)} className="btn-ghost p-1.5 text-red-400 hover:text-red-600 hover:bg-red-50" title="Delete">
-                        <Trash2 className="w-3.5 h-3.5" />
-                      </button>
+                      <button onClick={() => { setEditFlat(f); setShowForm(true); }} className="btn-ghost p-1.5" title="Edit"><Edit2 className="w-3.5 h-3.5" /></button>
+                      <button onClick={() => handleDelete(f.id)} className="btn-ghost p-1.5 text-red-400 hover:text-red-600 hover:bg-red-50" title="Delete"><Trash2 className="w-3.5 h-3.5" /></button>
                     </div>
                   </td>
                 )}
@@ -247,7 +281,6 @@ export default function Units() {
         </table>
       </div>
 
-      {/* Pagination */}
       {totalPages > 1 && (
         <div className="flex items-center justify-between">
           <p className="text-xs text-gray-500">Page {page} of {totalPages}</p>
@@ -308,11 +341,11 @@ function FlatForm({ flat, onClose, onSaved }) {
             <div><label className="label-text">Block</label>
               <select name="block" value={form.block} onChange={handleChange} className="select-field">
                 <option value="">Select</option>
-                {['A','B','C','D','E','F','G','H','I'].map(b => <option key={b} value={b}>{b}</option>)}
+                {BLOCKS.map(b => <option key={b} value={b}>{b}</option>)}
               </select></div>
           </div>
           <div className="grid grid-cols-2 gap-4">
-            <div><label className="label-text">Floor</label><input name="floor" type="number" value={form.floor} onChange={handleChange} className="input-field" /></div>
+            <div><label className="label-text">Floor</label><input name="floor" type="number" value={form.floor} onChange={handleChange} className="input-field" placeholder="0=Ground, 1=1st..." /></div>
             <div><label className="label-text">BHK Type *</label>
               <select name="bhk_type" value={form.bhk_type} onChange={handleChange} className="select-field">
                 {BHK_TYPES.map(b => <option key={b} value={b}>{b}</option>)}
